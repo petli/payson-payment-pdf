@@ -8,10 +8,13 @@ import os
 import argparse
 import csv
 import re
+from itertools import groupby
 
 import fpdf
 
 excel_escape_re = re.compile('^="(.*)"$')
+numeric_re = re.compile('^-?\d+,\d\d$')
+
 
 pdf_fields = {
     'sv': (('date', 'Datum:'),
@@ -54,7 +57,17 @@ def main():
     for f in input_files:
         translate_csv(csv.reader(f, delimiter = ';', skipinitialspace = True), args)
 
+
 def translate_csv(csv_input, args):
+    def keyfunc(v):
+        return v['_date_only']
+
+    rows = sorted(read_csv(csv_input), key=keyfunc)
+    for date, payments in groupby(rows, key=keyfunc):
+        generate_pdf(date, payments, args)
+
+
+def read_csv(csv_input):
     header = None
     for row in csv_input:
         if header is None:
@@ -65,7 +78,8 @@ def translate_csv(csv_input, args):
                 if field:
                     values[field] = strip_escape(row[i])
 
-            generate_pdf(values, args)
+            values['_date_only'] = values['date'].split()[0]
+            yield values
 
 
 def strip_escape(data):
@@ -77,34 +91,72 @@ def strip_escape(data):
         return data
 
 
-
-def generate_pdf(values, args, language = 'sv'):
-    pdf = fpdf.FPDF('P', 'mm', 'A4')
-    pdf.add_page()
-    pdf.set_font('Arial', 'B', 18)
-    pdf.cell(0, 10, 'Paysonbetalning', align= 'C', border = 'B')
-    pdf.ln()
-
-    for field, description in pdf_fields[language]:
-        pdf.set_font('Arial', 'B', 14)
-        pdf.cell(60, 10, description)
-        pdf.set_font('Arial', '', 14)
-        pdf.multi_cell(0, 8, values[field])
-
-    # In Python3 fpdf 1.7.2 can only output latin-1
-
-    date = values['date'].split()[0]
-    refnr = values['payson ref.']
-    filename = 'payson_{}_{}.pdf'.format(date, refnr)
+def generate_pdf(date, payments, args, language = 'sv'):
+    filename = 'payson_{}.pdf'.format(date)
     path = os.path.join(args.output_dir, filename)
 
     if os.path.exists(path) and not args.replace:
-        print('not replacing existing {}'.format(path))
+        #print('not replacing existing {}'.format(path))
         return
 
+    payments = sorted(payments, key=lambda v: v['payson ref.'])
+
+    gross_amount = sum_amounts(payments, 'amount')
+    total_fee = sum_amounts(payments, 'fee')
+    net_amount = sum_amounts(payments, 'change')
+    balance = payments[-1]['balance']
+
+    pdf = fpdf.FPDF('P', 'mm', 'A4')
+
+    # Generate summary page for all payments this day
+    pdf.add_page()
+    pdf.set_font('Arial', 'B', 18)
+    pdf.cell(0, 10, 'Paysonbetalningar', align= 'C', border = 'B')
+    pdf.ln()
+
+    pdf_sum_line(pdf, 'Datum:', date)
+    pdf_sum_line(pdf, 'Antal transaktioner:', str(len(payments)))
+    pdf_sum_line(pdf, 'Bruttobelopp:', gross_amount)
+    pdf_sum_line(pdf, 'Avgift:', total_fee)
+    pdf_sum_line(pdf, 'Nettobelopp:', net_amount)
+    pdf_sum_line(pdf, 'Nytt saldo:', balance)
+
+    # Generate one page for each payment
+    for values in payments:
+        pdf.add_page()
+
+        for field, description in pdf_fields[language]:
+            pdf_multi_line(pdf, description, values[field])
+
+    # In Python3 fpdf 1.7.2 can only output latin-1
     with open(path, 'wt', encoding = 'latin-1') as f:
         print('wrote {}'.format(path))
         f.write(pdf.output(dest = 'S'))
+
+
+def sum_amounts(payments, field):
+    # Sum stripping commas so the last two digits are decimals
+    total = sum([convert_numeric(p[field]) for p in payments])
+    return '{},{:02d}'.format(int(total / 100), abs(total) % 100)
+
+def convert_numeric(value):
+    assert numeric_re.match(value), 'Invalid numeric value: {}'.format(value)
+    return int(value.replace(',', ''))
+
+
+
+def pdf_multi_line(pdf, description, value, align='L'):
+    pdf.set_font('Arial', 'B', 14)
+    pdf.cell(60, 10, description)
+    pdf.set_font('Arial', '', 14)
+    pdf.multi_cell(0, 8, value, align=align)
+
+
+def pdf_sum_line(pdf, description, value):
+    pdf.set_font('Arial', 'B', 14)
+    pdf.cell(60, 10, description)
+    pdf.set_font('Arial', '', 14)
+    pdf.multi_cell(30, 8, value, align='R')
 
 
 if __name__ == '__main__':
